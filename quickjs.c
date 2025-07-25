@@ -49,6 +49,10 @@
 #include "libregexp.h"
 #include "xsum.h"
 
+#ifdef QJS_JITENABLED
+#include "quickjs-jit.h"
+#endif
+
 #if defined(EMSCRIPTEN) || defined(_MSC_VER)
 #define DIRECT_DISPATCH  0
 #else
@@ -650,6 +654,10 @@ typedef enum JSFunctionKindEnum {
     JS_FUNC_ASYNC_GENERATOR = (JS_FUNC_GENERATOR | JS_FUNC_ASYNC),
 } JSFunctionKindEnum;
 
+#ifdef QJS_JIT_ENABLED
+typedef struct JSJITFunction JSJITFunction; /* forward declaration */
+#endif
+
 typedef struct JSFunctionBytecode {
     JSGCObjectHeader header; /* must come first */
     uint8_t is_strict_mode : 1;
@@ -685,6 +693,9 @@ typedef struct JSFunctionBytecode {
     int pc2line_len;
     uint8_t *pc2line_buf;
     char *source;
+#ifdef QJS_JIT_ENABLED
+    JSJITFunction *jit_function;
+#endif
 } JSFunctionBytecode;
 
 typedef struct JSBoundFunction {
@@ -57849,6 +57860,16 @@ uintptr_t js_std_cmd(int cmd, ...) {
 
     return rv;
 }
+
+#ifdef QJS_JIT_ENABLED
+JSJITFunction* js_function_get_jit(JSFunctionBytecode *b) {
+    return b->jit_function;
+}
+
+void js_function_set_jit(JSFunctionBytecode *b, JSJITFunction *jit) {
+    b->jit_function = jit;
+}
+#endif
 
 #undef malloc
 #undef free

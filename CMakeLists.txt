@@ -149,6 +149,7 @@ xoption(QJS_ENABLE_ASAN "Enable AddressSanitizer (ASan)" OFF)
 xoption(QJS_ENABLE_MSAN "Enable MemorySanitizer (MSan)" OFF)
 xoption(QJS_ENABLE_TSAN "Enable ThreadSanitizer (TSan)" OFF)
 xoption(QJS_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (UBSan)" OFF)
+xoption(QJS_ENABLE_JIT "Enable JIT compilation" ON)
 
 if(QJS_ENABLE_ASAN)
 message(STATUS "Building with ASan")
@@ -206,6 +207,11 @@ add_link_options(
 )
 endif()
 
+if(QJS_ENABLE_JIT)
+    add_subdirectory(third-party/sljit)
+    list(APPEND qjs_defines QJS_JIT_ENABLED)
+    list(APPEND qjs_libs sljit)
+endif()
 
 # QuickJS library
 #
@@ -232,6 +238,10 @@ set(qjs_sources
     quickjs.c
     xsum.c
 )
+
+if(QJS_ENABLE_JIT)
+    list(APPEND qjs_sources quickjs-jit.c quickjs-jit.h)
+endif()
 
 if(QJS_BUILD_LIBC)
     list(APPEND qjs_sources quickjs-libc.c)
@@ -260,6 +270,10 @@ target_include_directories(qjs PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_link_libraries(qjs PUBLIC ${qjs_libs})
+
+if(QJS_ENABLE_JIT)
+    target_include_directories(qjs PRIVATE third-party/sljit/sljit_src)
+endif()
 
 if(EMSCRIPTEN)
     add_executable(qjs_wasm ${qjs_sources})
