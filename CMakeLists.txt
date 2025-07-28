@@ -208,7 +208,17 @@ add_link_options(
 endif()
 
 if(QJS_ENABLE_JIT)
-    add_subdirectory(third-party/sljit)
+    # Create SLJIT library directly instead of using add_subdirectory
+    # because SLJIT's CMakeLists.txt only creates sljit_test executable
+    add_library(sljit STATIC third-party/sljit/sljit_src/sljitLir.c)
+    target_include_directories(sljit PUBLIC 
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third-party/sljit/sljit_src>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/sljit>)
+    target_include_directories(sljit PRIVATE third-party/sljit/test_src)
+    target_compile_definitions(sljit PRIVATE SLJIT_HAVE_CONFIG_PRE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(sljit Threads::Threads)
+    
     list(APPEND qjs_defines QJS_JIT_ENABLED)
     list(APPEND qjs_libs sljit)
 endif()
@@ -448,7 +458,7 @@ if(NOT IOS)
     endif()
     install(TARGETS qjs_exe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(TARGETS qjsc RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-    install(TARGETS qjs EXPORT qjsConfig
+    install(TARGETS qjs sljit EXPORT qjsConfig
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
             LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
             ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})

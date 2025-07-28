@@ -36,6 +36,9 @@ void js_jit_increment_hotness(JSFunctionBytecode *b);
 // accessor functions for JSFunctionBytecode
 JSJITFunction* js_function_get_jit(JSFunctionBytecode *b);
 void js_function_set_jit(JSFunctionBytecode *b, JSJITFunction *jit);
+uint8_t* js_function_get_bytecode_ptr(JSFunctionBytecode *b);
+uint32_t js_function_get_bytecode_len(JSFunctionBytecode *b);
+uint16_t js_function_get_stack_size(JSFunctionBytecode *b);
 
 
 #endif /* QJS_JIT_ENABLED */
