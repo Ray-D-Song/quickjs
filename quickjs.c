@@ -77,6 +77,10 @@
 #define CONFIG_ATOMICS
 #endif
 
+#ifdef QJS_JIT_ENABLED
+#include "quickjs-jit.h"
+#endif
+
 #ifndef __GNUC__
 #define __extension__
 #endif
@@ -16565,6 +16569,25 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                          argv, flags);
     }
     b = p->u.func.function_bytecode;
+
+    #ifdef QJS_JIT_ENABLED
+    JSJITFunction *jit_func = js_function_get_jit(b);
+    if (!jit_func) {
+      js_jit_init(caller_ctx, b);
+      jit_func = js_function_get_jit(b);
+    }
+
+    if (jit_func) {
+      js_jit_increment_hotness(b);
+      if (js_jit_should_compile(b) && !jit_func->is_compiled) {
+        if (js_jit_compile(caller_ctx, jit_func)) {
+          return js_jit_execute(caller_ctx, jit_func, this_obj, argc, argv);
+        }
+      } else if (jit_func->is_compiled) {
+          return js_jit_execute(caller_ctx, jit_func, this_obj, argc, argv);
+      }
+    }
+    #endif
 
     if (unlikely(argc < b->arg_count || (flags & JS_CALL_FLAG_COPY_ARGV))) {
         arg_allocated_size = b->arg_count;
@@ -57868,6 +57891,18 @@ JSJITFunction* js_function_get_jit(JSFunctionBytecode *b) {
 
 void js_function_set_jit(JSFunctionBytecode *b, JSJITFunction *jit) {
     b->jit_function = jit;
+}
+
+uint8_t* js_function_get_bytecode_ptr(JSFunctionBytecode *b) {
+    return b->byte_code_buf;
+}
+
+uint32_t js_function_get_bytecode_len(JSFunctionBytecode *b) {
+    return b->byte_code_len;
+}
+
+uint16_t js_function_get_stack_size(JSFunctionBytecode *b) {
+    return b->stack_size;
 }
 #endif
 

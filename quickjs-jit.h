@@ -27,7 +27,7 @@ void js_jit_cleanup(JSRuntime *rt, JSJITFunction *jit_func);
 bool js_jit_compile(JSContext *ctx, JSJITFunction *jit_func);
 
 // execute
-void js_jit_execute(JSContext *ctx, JSJITFunction *jit_func, JSValueConst this_obj, JSValueConst *argv);
+JSValue js_jit_execute(JSContext *ctx, JSJITFunction *jit_func, JSValueConst this_obj, int argc, JSValueConst *argv);
 
 // hotness
 bool js_jit_should_compile(JSFunctionBytecode *b);
