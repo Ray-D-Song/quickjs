@@ -214,8 +214,6 @@ if(QJS_ENABLE_JIT)
     target_include_directories(sljit PUBLIC 
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third-party/sljit/sljit_src>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/sljit>)
-    # Disable SLJIT debug assertions to avoid parameter validation issues
-    target_compile_definitions(sljit PRIVATE SLJIT_ARGUMENT_CHECKS=0 SLJIT_DEBUG=0)
     # Remove SLJIT_HAVE_CONFIG_PRE to use default memory allocator
     # target_compile_definitions(sljit PRIVATE SLJIT_HAVE_CONFIG_PRE)
     find_package(Threads REQUIRED)
