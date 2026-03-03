@@ -59985,7 +59985,79 @@ static JSValue js_callsite_getnumber(JSContext *ctx, JSValueConst this_val, int 
     return js_int32(*field);
 }
 
+static JSValue js_callsite_getthis(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    JSCallSiteData *csd = JS_GetOpaque2(ctx, this_val, JS_CLASS_CALL_SITE);
+    if (!csd)
+        return JS_EXCEPTION;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_callsite_gettypename(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    JSCallSiteData *csd = JS_GetOpaque2(ctx, this_val, JS_CLASS_CALL_SITE);
+    if (!csd)
+        return JS_EXCEPTION;
+    return JS_NULL;
+}
+
+static JSValue js_callsite_getmethodname(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    JSCallSiteData *csd = JS_GetOpaque2(ctx, this_val, JS_CLASS_CALL_SITE);
+    if (!csd)
+        return JS_EXCEPTION;
+    return JS_NULL;
+}
+
+static JSValue js_callsite_istoplevel(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    JSCallSiteData *csd = JS_GetOpaque2(ctx, this_val, JS_CLASS_CALL_SITE);
+    if (!csd)
+        return JS_EXCEPTION;
+    return js_bool(JS_VALUE_GET_TAG(csd->func_name) == JS_TAG_NULL);
+}
+
+static JSValue js_callsite_isconstructor(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    JSCallSiteData *csd = JS_GetOpaque2(ctx, this_val, JS_CLASS_CALL_SITE);
+    if (!csd)
+        return JS_EXCEPTION;
+    return JS_FALSE;
+}
+
+static JSValue js_callsite_isasync(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    JSCallSiteData *csd = JS_GetOpaque2(ctx, this_val, JS_CLASS_CALL_SITE);
+    if (!csd)
+        return JS_EXCEPTION;
+    return JS_FALSE;
+}
+
+static JSValue js_callsite_ispromiseall(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    JSCallSiteData *csd = JS_GetOpaque2(ctx, this_val, JS_CLASS_CALL_SITE);
+    if (!csd)
+        return JS_EXCEPTION;
+    return JS_FALSE;
+}
+
+static JSValue js_callsite_getpromiseindex(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    JSCallSiteData *csd = JS_GetOpaque2(ctx, this_val, JS_CLASS_CALL_SITE);
+    if (!csd)
+        return JS_EXCEPTION;
+    return JS_NULL;
+}
+
 static const JSCFunctionListEntry js_callsite_proto_funcs[] = {
+    JS_CFUNC_DEF("getThis", 0, js_callsite_getthis),
+    JS_CFUNC_DEF("getTypeName", 0, js_callsite_gettypename),
+    JS_CFUNC_DEF("getMethodName", 0, js_callsite_getmethodname),
+    JS_CFUNC_DEF("isToplevel", 0, js_callsite_istoplevel),
+    JS_CFUNC_DEF("isConstructor", 0, js_callsite_isconstructor),
+    JS_CFUNC_DEF("isAsync", 0, js_callsite_isasync),
+    JS_CFUNC_DEF("isPromiseAll", 0, js_callsite_ispromiseall),
+    JS_CFUNC_DEF("getPromiseIndex", 0, js_callsite_getpromiseindex),
     JS_CFUNC_DEF("isNative", 0, js_callsite_isnative),
     JS_CFUNC_DEF("isEval", 0, js_callsite_iseval),
     JS_CFUNC_DEF("getEvalOrigin", 0, js_callsite_getevalorigin),
