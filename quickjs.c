@@ -1121,11 +1121,26 @@ struct JSObject {
 
 typedef struct JSCallSiteData {
     JSValue filename;
+    JSValue script_name_or_source_url;
+    JSValue script_hash;
     JSValue func;
     JSValue func_name;
+    JSValue this_val;
+    JSValue type_name;
+    JSValue method_name;
+    JSValue eval_origin;
     bool native;
+    bool is_eval;
+    bool is_toplevel;
+    bool is_constructor;
+    bool is_async;
+    bool is_promise_all;
     int line_num;
     int col_num;
+    int enclosing_line_num;
+    int enclosing_col_num;
+    int position;
+    int promise_index;
 } JSCallSiteData;
 
 enum {
@@ -1456,6 +1471,7 @@ static void js_set_uncatchable_error(JSContext *ctx, JSValueConst val,
 static JSValue js_new_callsite(JSContext *ctx, JSCallSiteData *csd);
 static void js_new_callsite_data(JSContext *ctx, JSCallSiteData *csd, JSStackFrame *sf);
 static void js_new_callsite_data2(JSContext *ctx, JSCallSiteData *csd, const char *filename, int line_num, int col_num);
+static void js_callsite_data_free_ctx(JSContext *ctx, JSCallSiteData *csd);
 static void _JS_AddIntrinsicCallSite(JSContext *ctx);
 
 static void JS_SetOpaqueInternal(JSValueConst obj, void *opaque);
@@ -7608,6 +7624,111 @@ static const char *get_func_name(JSContext *ctx, JSValueConst func)
     return JS_ToCString(ctx, val);
 }
 
+static bool js_is_trace_enabled(void)
+{
+    const char *val = getenv("FJS_TRACE");
+    return val && val[0];
+}
+
+static const char *js_tag_name(int tag)
+{
+    switch (tag) {
+    case JS_TAG_UNDEFINED:
+        return "undefined";
+    case JS_TAG_NULL:
+        return "null";
+    case JS_TAG_BOOL:
+        return "bool";
+    case JS_TAG_INT:
+        return "int";
+    case JS_TAG_FLOAT64:
+        return "float64";
+    case JS_TAG_STRING:
+        return "string";
+    case JS_TAG_SYMBOL:
+        return "symbol";
+    case JS_TAG_OBJECT:
+        return "object";
+    case JS_TAG_FUNCTION_BYTECODE:
+        return "function_bytecode";
+    case JS_TAG_MODULE:
+        return "module";
+    case JS_TAG_BIG_INT:
+        return "bigint";
+    case JS_TAG_EXCEPTION:
+        return "exception";
+    case JS_TAG_UNINITIALIZED:
+        return "uninitialized";
+    case JS_TAG_CATCH_OFFSET:
+        return "catch_offset";
+    default:
+        return "unknown";
+    }
+}
+
+static void js_trace_notfn_value(JSContext *ctx, JSValueConst val)
+{
+    int tag = JS_VALUE_GET_TAG(val);
+    fprintf(stderr, "[fjs:notfn:value] tag=%d (%s)", tag, js_tag_name(tag));
+    if (tag == JS_TAG_OBJECT) {
+        JSObject *p = JS_VALUE_GET_OBJ(val);
+        JSRuntime *rt = ctx->rt;
+        char class_name[ATOM_GET_STR_BUF_SIZE];
+        class_name[0] = '\0';
+        JS_AtomGetStrRT(rt, class_name, sizeof(class_name),
+                        rt->class_array[p->class_id].class_name);
+        fprintf(stderr, " class_id=%u class=%s callable=%d",
+                (unsigned)p->class_id,
+                class_name[0] ? class_name : "<unknown>",
+                rt->class_array[p->class_id].call != NULL);
+    }
+    fprintf(stderr, "\n");
+    fflush(stderr);
+}
+
+static void js_trace_typeerror_site(JSContext *ctx, const char *tag)
+{
+    JSStackFrame *sf;
+    JSObject *p;
+    JSFunctionBytecode *b;
+    int line_num = -1, col_num = -1;
+    const char *filename = "<unknown>";
+    const char *func_name = "<unknown>";
+    char filename_buf[1024];
+    char func_name_buf[ATOM_GET_STR_BUF_SIZE];
+
+    sf = ctx->rt->current_stack_frame;
+    if (!sf)
+        goto done;
+    if (JS_VALUE_GET_TAG(sf->cur_func) != JS_TAG_OBJECT)
+        goto done;
+
+    p = JS_VALUE_GET_OBJ(sf->cur_func);
+    if (!js_class_has_bytecode(p->class_id))
+        goto done;
+
+    b = p->u.func.function_bytecode;
+    if (b->filename != JS_ATOM_NULL) {
+        JS_AtomGetStr(ctx, filename_buf, sizeof(filename_buf), b->filename);
+        if (filename_buf[0])
+            filename = filename_buf;
+    }
+    if (b->func_name != JS_ATOM_NULL) {
+        JS_AtomGetStr(ctx, func_name_buf, sizeof(func_name_buf), b->func_name);
+        if (func_name_buf[0])
+            func_name = func_name_buf;
+    }
+    if (sf->cur_pc) {
+        uint32_t pc = sf->cur_pc - b->byte_code_buf - 1;
+        line_num = find_line_num(ctx, b, pc, &col_num);
+    }
+
+done:
+    fprintf(stderr, "[fjs:%s] %s line=%d col=%d func=%s\n",
+            tag, filename, line_num, col_num, func_name);
+    fflush(stderr);
+}
+
 /* Note: it is important that no exception is returned by this function */
 static bool can_add_backtrace(JSValueConst obj)
 {
@@ -7791,9 +7912,7 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
         }
         // Clear the csd's we didn't use in case of error.
         for (k = j; k < i; k++) {
-            JS_FreeValue(ctx, csd[k].filename);
-            JS_FreeValue(ctx, csd[k].func);
-            JS_FreeValue(ctx, csd[k].func_name);
+            js_callsite_data_free_ctx(ctx, &csd[k]);
         }
         JSValueConst args[] = {
             error_val,
@@ -8025,6 +8144,8 @@ fini:
 
 static JSValue JS_ThrowTypeErrorNotAFunction(JSContext *ctx)
 {
+    if (js_is_trace_enabled())
+        js_trace_typeerror_site(ctx, "notfn");
     return JS_ThrowTypeError(ctx, "not a function");
 }
 
@@ -9741,6 +9862,8 @@ static int call_setter(JSContext *ctx, JSObject *setter,
         JS_FreeValue(ctx, val);
         if ((flags & JS_PROP_THROW) ||
             ((flags & JS_PROP_THROW_STRICT) && is_strict_mode(ctx))) {
+            if (js_is_trace_enabled())
+                js_trace_typeerror_site(ctx, "nosetter");
             JS_ThrowTypeError(ctx, "no setter for property");
             return -1;
         }
@@ -17324,6 +17447,8 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
         call_func = rt->class_array[p->class_id].call;
         if (!call_func) {
         not_a_function:
+            if (js_is_trace_enabled())
+                js_trace_notfn_value(caller_ctx, func_obj);
             return JS_ThrowTypeErrorNotAFunction(caller_ctx);
         }
         return call_func(caller_ctx, func_obj, this_obj, argc,
@@ -20067,6 +20192,8 @@ static JSValue JS_CallConstructorInternal(JSContext *ctx,
         call_func = ctx->rt->class_array[p->class_id].call;
         if (!call_func) {
         not_a_function:
+            if (js_is_trace_enabled())
+                js_trace_notfn_value(ctx, func_obj);
             return JS_ThrowTypeErrorNotAFunction(ctx);
         }
         return call_func(ctx, func_obj, new_target, argc,
@@ -27931,7 +28058,6 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
 
     if (token_is_pseudo_keyword(s, JS_ATOM_of)) {
         is_for_of = true;
-        break_entry.has_iterator = true;
         break_entry.drop_count += 2;
         if (has_initializer)
             goto initializer_error;
@@ -27964,6 +28090,9 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
             emit_op(s, OP_for_await_of_start);
         else
             emit_op(s, OP_for_of_start);
+        /* The iterator cleanup path is only valid after for_of_start has
+           materialized its catch-offset stack shape. */
+        break_entry.has_iterator = true;
         /* on stack: enum_rec */
     } else {
         emit_op(s, OP_for_in_start);
@@ -38863,6 +38992,10 @@ static int check_function(JSContext *ctx, JSValueConst obj)
 {
     if (likely(JS_IsFunction(ctx, obj)))
         return 0;
+    if (js_is_trace_enabled()) {
+        fprintf(stderr, "[fjs:notfn:check_function]\n");
+        js_trace_notfn_value(ctx, obj);
+    }
     JS_ThrowTypeErrorNotAFunction(ctx);
     return -1;
 }
@@ -59624,13 +59757,167 @@ static void insert_weakref_record(JSValueConst target,
 
 /* CallSite */
 
+static void js_callsite_data_init(JSCallSiteData *csd)
+{
+    csd->filename = JS_UNDEFINED;
+    csd->script_name_or_source_url = JS_UNDEFINED;
+    csd->script_hash = JS_UNDEFINED;
+    csd->func = JS_UNDEFINED;
+    csd->func_name = JS_NULL;
+    csd->this_val = JS_UNDEFINED;
+    csd->type_name = JS_NULL;
+    csd->method_name = JS_NULL;
+    csd->eval_origin = JS_UNDEFINED;
+    csd->native = false;
+    csd->is_eval = false;
+    csd->is_toplevel = false;
+    csd->is_constructor = false;
+    csd->is_async = false;
+    csd->is_promise_all = false;
+    csd->line_num = -1;
+    csd->col_num = -1;
+    csd->enclosing_line_num = -1;
+    csd->enclosing_col_num = -1;
+    csd->position = -1;
+    csd->promise_index = -1;
+}
+
+static void js_callsite_data_clear_exception(JSContext *ctx)
+{
+    JSValue exc = JS_GetException(ctx);
+    JS_FreeValue(ctx, exc);
+}
+
+static JSValue js_callsite_make_hash(JSContext *ctx, const uint8_t *data, size_t len)
+{
+    uint64_t h = UINT64_C(1469598103934665603);
+    size_t i;
+    char buf[17];
+    for (i = 0; i < len; i++) {
+        h ^= data[i];
+        h *= UINT64_C(1099511628211);
+    }
+    snprintf(buf, sizeof(buf), "%016" PRIx64, h);
+    return JS_NewString(ctx, buf);
+}
+
+static JSValue js_callsite_build_eval_origin(JSContext *ctx, JSStackFrame *sf)
+{
+    JSStackFrame *caller = sf ? sf->prev_frame : NULL;
+    JSValue ret;
+    const char *caller_name_alloc = NULL;
+    const char *caller_name = "<anonymous>";
+    JSObject *p;
+    JSFunctionBytecode *b;
+    const char *filename_alloc = NULL;
+    const char *filename = "<anonymous>";
+    const char *display_filename = "<anonymous>";
+    int line_num = -1, col_num = -1;
+    bool has_bytecode = false;
+    bool caller_is_eval = false;
+    DynBuf dbuf;
+
+    if (caller && js_same_value(ctx, caller->cur_func, ctx->eval_obj))
+        caller = caller->prev_frame;
+
+    if (!caller)
+        return JS_UNDEFINED;
+
+    caller_name_alloc = get_func_name(ctx, caller->cur_func);
+    if (caller_name_alloc && caller_name_alloc[0] != '\0')
+        caller_name = caller_name_alloc;
+
+    if (JS_VALUE_GET_TAG(caller->cur_func) == JS_TAG_OBJECT) {
+        p = JS_VALUE_GET_OBJ(caller->cur_func);
+        if (js_class_has_bytecode(p->class_id)) {
+            has_bytecode = true;
+            b = p->u.func.function_bytecode;
+            caller_is_eval = (b->func_name == JS_ATOM__eval_);
+            if (caller_is_eval)
+                caller_name = "<anonymous>";
+            line_num = b->line_num;
+            col_num = b->col_num;
+            if (caller->cur_pc) {
+                uint32_t pc = caller->cur_pc - b->byte_code_buf - 1;
+                line_num = find_line_num(ctx, b, pc, &col_num);
+            }
+            if (b->filename != JS_ATOM_NULL)
+                filename_alloc = JS_AtomToCString(ctx, b->filename);
+            if (filename_alloc && filename_alloc[0] != '\0')
+                filename = filename_alloc;
+            if (strcmp(filename, "<eval>") != 0 &&
+                strcmp(filename, "<input>") != 0)
+                display_filename = filename;
+        }
+    }
+
+    js_dbuf_init(ctx, &dbuf);
+    if (!has_bytecode) {
+        dbuf_printf(&dbuf, "eval at %s (native)", caller_name);
+    } else if (!caller_is_eval) {
+        dbuf_printf(&dbuf, "eval at %s (%s", caller_name, filename);
+        if (line_num != -1)
+            dbuf_printf(&dbuf, ":%d:%d", line_num, col_num);
+        dbuf_putc(&dbuf, ')');
+    } else {
+        JSValue parent_origin = js_callsite_build_eval_origin(ctx, caller);
+        const char *parent_origin_str = NULL;
+        dbuf_printf(&dbuf, "eval at %s (", caller_name);
+        if (JS_IsString(parent_origin))
+            parent_origin_str = JS_ToCString(ctx, parent_origin);
+        if (parent_origin_str)
+            dbuf_printf(&dbuf, "%s", parent_origin_str);
+        else
+            dbuf_printf(&dbuf, "<anonymous>");
+        if (line_num != -1)
+            dbuf_printf(&dbuf, ", %s:%d:%d", display_filename, line_num, col_num);
+        else
+            dbuf_printf(&dbuf, ", %s", display_filename);
+        dbuf_putc(&dbuf, ')');
+        JS_FreeCString(ctx, parent_origin_str);
+        JS_FreeValue(ctx, parent_origin);
+    }
+
+    if (dbuf_error(&dbuf)) {
+        dbuf_free(&dbuf);
+        ret = JS_EXCEPTION;
+    } else {
+        ret = JS_NewStringLen(ctx, (char *)dbuf.buf, dbuf.size);
+        dbuf_free(&dbuf);
+    }
+
+    JS_FreeCString(ctx, filename_alloc);
+    JS_FreeCString(ctx, caller_name_alloc);
+
+    return ret;
+}
+
+static void js_callsite_data_free_ctx(JSContext *ctx, JSCallSiteData *csd)
+{
+    JS_FreeValue(ctx, csd->filename);
+    JS_FreeValue(ctx, csd->script_name_or_source_url);
+    JS_FreeValue(ctx, csd->script_hash);
+    JS_FreeValue(ctx, csd->func);
+    JS_FreeValue(ctx, csd->func_name);
+    JS_FreeValue(ctx, csd->this_val);
+    JS_FreeValue(ctx, csd->type_name);
+    JS_FreeValue(ctx, csd->method_name);
+    JS_FreeValue(ctx, csd->eval_origin);
+}
+
 static void js_callsite_finalizer(JSRuntime *rt, JSValueConst val)
 {
     JSCallSiteData *csd = JS_GetOpaque(val, JS_CLASS_CALL_SITE);
     if (csd) {
         JS_FreeValueRT(rt, csd->filename);
+        JS_FreeValueRT(rt, csd->script_name_or_source_url);
+        JS_FreeValueRT(rt, csd->script_hash);
         JS_FreeValueRT(rt, csd->func);
         JS_FreeValueRT(rt, csd->func_name);
+        JS_FreeValueRT(rt, csd->this_val);
+        JS_FreeValueRT(rt, csd->type_name);
+        JS_FreeValueRT(rt, csd->method_name);
+        JS_FreeValueRT(rt, csd->eval_origin);
         js_free_rt(rt, csd);
     }
 }
@@ -59641,8 +59928,14 @@ static void js_callsite_mark(JSRuntime *rt, JSValueConst val,
     JSCallSiteData *csd = JS_GetOpaque(val, JS_CLASS_CALL_SITE);
     if (csd) {
         JS_MarkValue(rt, csd->filename, mark_func);
+        JS_MarkValue(rt, csd->script_name_or_source_url, mark_func);
+        JS_MarkValue(rt, csd->script_hash, mark_func);
         JS_MarkValue(rt, csd->func, mark_func);
         JS_MarkValue(rt, csd->func_name, mark_func);
+        JS_MarkValue(rt, csd->this_val, mark_func);
+        JS_MarkValue(rt, csd->type_name, mark_func);
+        JS_MarkValue(rt, csd->method_name, mark_func);
+        JS_MarkValue(rt, csd->eval_origin, mark_func);
     }
 }
 
@@ -59668,8 +59961,11 @@ static void js_new_callsite_data(JSContext *ctx, JSCallSiteData *csd, JSStackFra
 {
     const char *func_name_str;
     JSObject *p;
+    JSFunctionBytecode *b;
 
+    js_callsite_data_init(csd);
     csd->func = js_dup(sf->cur_func);
+    csd->is_toplevel = (sf->prev_frame == NULL);
     /* func_name_str is UTF-8 encoded if needed */
     func_name_str = get_func_name(ctx, sf->cur_func);
     if (!func_name_str || func_name_str[0] == '\0')
@@ -59680,41 +59976,78 @@ static void js_new_callsite_data(JSContext *ctx, JSCallSiteData *csd, JSStackFra
     if (JS_IsException(csd->func_name))
         csd->func_name = JS_NULL;
 
+    if (JS_VALUE_GET_TAG(sf->cur_func) != JS_TAG_OBJECT) {
+        csd->native = true;
+        return;
+    }
+
     p = JS_VALUE_GET_OBJ(sf->cur_func);
     if (js_class_has_bytecode(p->class_id)) {
-        JSFunctionBytecode *b = p->u.func.function_bytecode;
-        int line_num1, col_num1;
-        line_num1 = find_line_num(ctx, b,
-                                  sf->cur_pc - b->byte_code_buf - 1,
-                                  &col_num1);
+        b = p->u.func.function_bytecode;
         csd->native = false;
-        csd->line_num = line_num1;
-        csd->col_num = col_num1;
-        csd->filename = JS_AtomToString(ctx, b->filename);
-        if (JS_IsException(csd->filename)) {
-            csd->filename = JS_NULL;
-            JS_FreeValue(ctx, JS_GetException(ctx)); // Clear exception.
+        csd->is_eval = (b->func_name == JS_ATOM__eval_);
+        csd->is_async = ((b->func_kind & JS_FUNC_ASYNC) != 0);
+        csd->enclosing_line_num = b->line_num;
+        csd->enclosing_col_num = b->col_num;
+        if (sf->cur_pc) {
+            uint32_t pc = sf->cur_pc - b->byte_code_buf - 1;
+            csd->position = pc;
+            csd->line_num = find_line_num(ctx, b, pc, &csd->col_num);
+        } else {
+            csd->line_num = b->line_num;
+            csd->col_num = b->col_num;
+        }
+        if (b->filename != JS_ATOM_NULL) {
+            csd->filename = JS_AtomToString(ctx, b->filename);
+            if (JS_IsException(csd->filename)) {
+                csd->filename = JS_UNDEFINED;
+                js_callsite_data_clear_exception(ctx);
+            }
+            csd->script_name_or_source_url = js_dup(csd->filename);
+        }
+        if (b->source && b->source_len > 0)
+            csd->script_hash = js_callsite_make_hash(ctx, (const uint8_t *)b->source, b->source_len);
+        else if (b->filename != JS_ATOM_NULL) {
+            const char *filename = JS_AtomToCString(ctx, b->filename);
+            if (filename) {
+                csd->script_hash = js_callsite_make_hash(ctx, (const uint8_t *)filename, strlen(filename));
+                JS_FreeCString(ctx, filename);
+            }
+        }
+        if (JS_IsException(csd->script_hash)) {
+            csd->script_hash = JS_UNDEFINED;
+            js_callsite_data_clear_exception(ctx);
+        }
+        if (csd->is_eval) {
+            csd->eval_origin = js_callsite_build_eval_origin(ctx, sf);
+            if (JS_IsException(csd->eval_origin)) {
+                csd->eval_origin = JS_UNDEFINED;
+                js_callsite_data_clear_exception(ctx);
+            }
         }
     } else {
         csd->native = true;
-        csd->line_num = -1;
-        csd->col_num = -1;
-        csd->filename = JS_NULL;
     }
 }
 
 static void js_new_callsite_data2(JSContext *ctx, JSCallSiteData *csd, const char *filename, int line_num, int col_num)
 {
-    csd->func = JS_NULL;
-    csd->func_name = JS_NULL;
-    csd->native = false;
+    js_callsite_data_init(csd);
+    csd->is_toplevel = true;
     csd->line_num = line_num;
     csd->col_num = col_num;
     /* filename is UTF-8 encoded if needed (original argument to __JS_EvalInternal()) */
     csd->filename = JS_NewString(ctx, filename);
     if (JS_IsException(csd->filename)) {
-        csd->filename = JS_NULL;
-        JS_FreeValue(ctx, JS_GetException(ctx)); // Clear exception.
+        csd->filename = JS_UNDEFINED;
+        js_callsite_data_clear_exception(ctx);
+    } else {
+        csd->script_name_or_source_url = js_dup(csd->filename);
+    }
+    csd->script_hash = js_callsite_make_hash(ctx, (const uint8_t *)filename, strlen(filename));
+    if (JS_IsException(csd->script_hash)) {
+        csd->script_hash = JS_UNDEFINED;
+        js_callsite_data_clear_exception(ctx);
     }
 }
 
@@ -59741,16 +60074,140 @@ static JSValue js_callsite_getnumber(JSContext *ctx, JSValueConst this_val, int 
     if (!csd)
         return JS_EXCEPTION;
     int *field = (void *)((char *)csd + magic);
+    if (*field < 0)
+        return JS_UNDEFINED;
     return js_int32(*field);
 }
 
+static JSValue js_callsite_getpromiseindex(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    JSCallSiteData *csd = JS_GetOpaque2(ctx, this_val, JS_CLASS_CALL_SITE);
+    if (!csd)
+        return JS_EXCEPTION;
+    if (csd->promise_index < 0)
+        return JS_NULL;
+    return js_int32(csd->promise_index);
+}
+
+static JSValue js_callsite_getbool(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic)
+{
+    JSCallSiteData *csd = JS_GetOpaque2(ctx, this_val, JS_CLASS_CALL_SITE);
+    if (!csd)
+        return JS_EXCEPTION;
+    bool *field = (void *)((char *)csd + magic);
+    return js_bool(*field);
+}
+
+static JSValue js_callsite_tostring(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    JSCallSiteData *csd = JS_GetOpaque2(ctx, this_val, JS_CLASS_CALL_SITE);
+    DynBuf dbuf;
+    const char *func_name = NULL;
+    const char *method_name = NULL;
+    const char *filename = NULL;
+    const char *eval_origin = NULL;
+    bool has_name = false;
+    bool has_location = false;
+    JSValue ret;
+
+    if (!csd)
+        return JS_EXCEPTION;
+
+    if (JS_IsString(csd->func_name))
+        func_name = JS_ToCString(ctx, csd->func_name);
+    if (JS_IsString(csd->method_name))
+        method_name = JS_ToCString(ctx, csd->method_name);
+    if (JS_IsString(csd->filename))
+        filename = JS_ToCString(ctx, csd->filename);
+    if (JS_IsString(csd->eval_origin))
+        eval_origin = JS_ToCString(ctx, csd->eval_origin);
+
+    js_dbuf_init(ctx, &dbuf);
+    if (csd->is_constructor) {
+        dbuf_printf(&dbuf, "new %s", func_name ? func_name : "<anonymous>");
+        has_name = true;
+    } else if (func_name && func_name[0] != '\0') {
+        dbuf_printf(&dbuf, "%s", func_name);
+        has_name = true;
+    } else if (method_name && method_name[0] != '\0') {
+        dbuf_printf(&dbuf, "%s", method_name);
+        has_name = true;
+    }
+
+    if (has_name)
+        dbuf_printf(&dbuf, " (");
+
+    if (csd->native) {
+        dbuf_printf(&dbuf, "native");
+        has_location = true;
+    } else if (csd->is_eval && eval_origin) {
+        dbuf_printf(&dbuf, "%s", eval_origin);
+        if (filename && filename[0] != '\0') {
+            dbuf_printf(&dbuf, ", %s", filename);
+            if (csd->line_num >= 0)
+                dbuf_printf(&dbuf, ":%d:%d", csd->line_num, csd->col_num);
+        }
+        has_location = true;
+    } else if (filename && filename[0] != '\0') {
+        dbuf_printf(&dbuf, "%s", filename);
+        if (csd->line_num >= 0)
+            dbuf_printf(&dbuf, ":%d:%d", csd->line_num, csd->col_num);
+        has_location = true;
+    } else if (csd->line_num >= 0) {
+        dbuf_printf(&dbuf, "<anonymous>:%d:%d", csd->line_num, csd->col_num);
+        has_location = true;
+    }
+
+    if (!has_location)
+        dbuf_printf(&dbuf, "unknown");
+    if (has_name)
+        dbuf_printf(&dbuf, ")");
+
+    if (dbuf_error(&dbuf)) {
+        ret = JS_EXCEPTION;
+    } else {
+        ret = JS_NewStringLen(ctx, (char *)dbuf.buf, dbuf.size);
+    }
+
+    dbuf_free(&dbuf);
+    JS_FreeCString(ctx, eval_origin);
+    JS_FreeCString(ctx, filename);
+    JS_FreeCString(ctx, method_name);
+    JS_FreeCString(ctx, func_name);
+
+    return ret;
+}
+
+static JSValue js_callsite_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv)
+{
+    JSCallSiteData csd;
+    js_callsite_data_init(&csd);
+    return js_new_callsite(ctx, &csd);
+}
+
 static const JSCFunctionListEntry js_callsite_proto_funcs[] = {
+    JS_CFUNC_MAGIC_DEF("getThis", 0, js_callsite_getfield, offsetof(JSCallSiteData, this_val)),
+    JS_CFUNC_MAGIC_DEF("getTypeName", 0, js_callsite_getfield, offsetof(JSCallSiteData, type_name)),
+    JS_CFUNC_MAGIC_DEF("getMethodName", 0, js_callsite_getfield, offsetof(JSCallSiteData, method_name)),
     JS_CFUNC_DEF("isNative", 0, js_callsite_isnative),
+    JS_CFUNC_MAGIC_DEF("isToplevel", 0, js_callsite_getbool, offsetof(JSCallSiteData, is_toplevel)),
+    JS_CFUNC_MAGIC_DEF("isEval", 0, js_callsite_getbool, offsetof(JSCallSiteData, is_eval)),
+    JS_CFUNC_MAGIC_DEF("isConstructor", 0, js_callsite_getbool, offsetof(JSCallSiteData, is_constructor)),
+    JS_CFUNC_MAGIC_DEF("isAsync", 0, js_callsite_getbool, offsetof(JSCallSiteData, is_async)),
+    JS_CFUNC_MAGIC_DEF("isPromiseAll", 0, js_callsite_getbool, offsetof(JSCallSiteData, is_promise_all)),
     JS_CFUNC_MAGIC_DEF("getFileName", 0, js_callsite_getfield, offsetof(JSCallSiteData, filename)),
+    JS_CFUNC_MAGIC_DEF("getScriptNameOrSourceURL", 0, js_callsite_getfield, offsetof(JSCallSiteData, script_name_or_source_url)),
+    JS_CFUNC_MAGIC_DEF("getScriptHash", 0, js_callsite_getfield, offsetof(JSCallSiteData, script_hash)),
     JS_CFUNC_MAGIC_DEF("getFunction", 0, js_callsite_getfield, offsetof(JSCallSiteData, func)),
     JS_CFUNC_MAGIC_DEF("getFunctionName", 0, js_callsite_getfield, offsetof(JSCallSiteData, func_name)),
+    JS_CFUNC_MAGIC_DEF("getEvalOrigin", 0, js_callsite_getfield, offsetof(JSCallSiteData, eval_origin)),
     JS_CFUNC_MAGIC_DEF("getColumnNumber", 0, js_callsite_getnumber, offsetof(JSCallSiteData, col_num)),
     JS_CFUNC_MAGIC_DEF("getLineNumber", 0, js_callsite_getnumber, offsetof(JSCallSiteData, line_num)),
+    JS_CFUNC_MAGIC_DEF("getEnclosingColumnNumber", 0, js_callsite_getnumber, offsetof(JSCallSiteData, enclosing_col_num)),
+    JS_CFUNC_MAGIC_DEF("getEnclosingLineNumber", 0, js_callsite_getnumber, offsetof(JSCallSiteData, enclosing_line_num)),
+    JS_CFUNC_MAGIC_DEF("getPosition", 0, js_callsite_getnumber, offsetof(JSCallSiteData, position)),
+    JS_CFUNC_DEF("getPromiseIndex", 0, js_callsite_getpromiseindex),
+    JS_CFUNC_DEF("toString", 0, js_callsite_tostring),
     JS_PROP_STRING_DEF("[Symbol.toStringTag]", "CallSite", JS_PROP_CONFIGURABLE ),
 };
 
@@ -59761,6 +60218,7 @@ static const JSClassShortDef js_callsite_class_def[] = {
 static void _JS_AddIntrinsicCallSite(JSContext *ctx)
 {
     JSRuntime *rt = ctx->rt;
+    JSValue ctor;
 
     if (!JS_IsRegisteredClass(rt, JS_CLASS_CALL_SITE)) {
         init_class_range(rt, js_callsite_class_def, JS_CLASS_CALL_SITE,
@@ -59770,6 +60228,10 @@ static void _JS_AddIntrinsicCallSite(JSContext *ctx)
     JS_SetPropertyFunctionList(ctx, ctx->class_proto[JS_CLASS_CALL_SITE],
                                js_callsite_proto_funcs,
                                countof(js_callsite_proto_funcs));
+    ctor = JS_NewCFunction2(ctx, js_callsite_constructor, "CallSite", 0,
+                            JS_CFUNC_constructor_or_func, 0);
+    JS_SetConstructor(ctx, ctor, ctx->class_proto[JS_CLASS_CALL_SITE]);
+    JS_FreeValue(ctx, ctor);
 }
 
 /* DOMException */
