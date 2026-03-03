@@ -8165,6 +8165,59 @@ fini:
 
 static JSValue JS_ThrowTypeErrorNotAFunction(JSContext *ctx)
 {
+    JSRuntime *rt;
+    JSStackFrame *sf;
+    const char *trace_notfn_env;
+    int trace_notfn_enabled;
+
+    trace_notfn_env = getenv("FJS_TRACE_NOTFN");
+    trace_notfn_enabled = (trace_notfn_env && trace_notfn_env[0] != '\0' &&
+                           trace_notfn_env[0] != '0');
+
+    if (!trace_notfn_enabled)
+        return JS_ThrowTypeError(ctx, "not a function");
+
+    rt = ctx->rt;
+    sf = rt ? rt->current_stack_frame : NULL;
+    if (sf) {
+        JSValueConst cur_func = sf->cur_func;
+        if (JS_VALUE_GET_TAG(cur_func) == JS_TAG_OBJECT) {
+            JSObject *p = JS_VALUE_GET_OBJ(cur_func);
+            if (js_class_has_bytecode(p->class_id)) {
+                JSFunctionBytecode *b = p->u.func.function_bytecode;
+                int line_num = -1, col_num = -1;
+                const char *file_name = NULL;
+                const char *func_name = NULL;
+                int pc = 0;
+                if (sf->cur_pc && b->byte_code_buf)
+                    pc = sf->cur_pc - b->byte_code_buf - 1;
+                line_num = find_line_num(ctx, b, pc, &col_num);
+                if (b->filename)
+                    file_name = JS_AtomToCString(ctx, b->filename);
+                func_name = get_func_name(ctx, cur_func);
+                fprintf(stderr,
+                        "[fjs:notfn] bytecode file=%s line=%d col=%d func=%s\n",
+                        file_name ? file_name : "<unknown>",
+                        line_num,
+                        col_num,
+                        func_name ? func_name : "<anonymous>");
+                if (file_name)
+                    JS_FreeCString(ctx, file_name);
+                if (func_name)
+                    JS_FreeCString(ctx, func_name);
+            } else {
+                fprintf(stderr,
+                        "[fjs:notfn] non-bytecode class_id=%d\n",
+                        p->class_id);
+            }
+        } else {
+            fprintf(stderr,
+                    "[fjs:notfn] callee_tag=%d (non-object)\n",
+                    JS_VALUE_GET_TAG(cur_func));
+        }
+    } else {
+        fprintf(stderr, "[fjs:notfn] no current stack frame\n");
+    }
     return JS_ThrowTypeError(ctx, "not a function");
 }
 
