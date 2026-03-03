@@ -17447,8 +17447,27 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
         call_func = rt->class_array[p->class_id].call;
         if (!call_func) {
         not_a_function:
-            if (js_is_trace_enabled())
+            if (js_is_trace_enabled()) {
+                if (JS_VALUE_GET_TAG(this_obj) == JS_TAG_OBJECT) {
+                    JSObject *this_obj_p = JS_VALUE_GET_OBJ(this_obj);
+                    JSRuntime *rt = caller_ctx->rt;
+                    char this_class_name[ATOM_GET_STR_BUF_SIZE];
+                    this_class_name[0] = '\0';
+                    JS_AtomGetStrRT(rt, this_class_name, sizeof(this_class_name),
+                                    rt->class_array[this_obj_p->class_id].class_name);
+                    fprintf(stderr,
+                            "[fjs:notfn:this] class_id=%u class=%s callable=%d\n",
+                            (unsigned)this_obj_p->class_id,
+                            this_class_name[0] ? this_class_name : "<unknown>",
+                            rt->class_array[this_obj_p->class_id].call != NULL);
+                    fflush(stderr);
+                }
+                fprintf(stderr, "[fjs:notfn:call] argc=%d this_tag=%d (%s)\n",
+                        argc, JS_VALUE_GET_TAG(this_obj),
+                        js_tag_name(JS_VALUE_GET_TAG(this_obj)));
+                fflush(stderr);
                 js_trace_notfn_value(caller_ctx, func_obj);
+            }
             return JS_ThrowTypeErrorNotAFunction(caller_ctx);
         }
         return call_func(caller_ctx, func_obj, this_obj, argc,
